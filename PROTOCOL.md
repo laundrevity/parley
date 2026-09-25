@@ -1,10 +1,10 @@
 # parley — PROTOCOL
 
-**Version:** 0.1 (2026-09-25) · **Status:** draft for the manual week · **Companion:** [SCHEMA.md](SCHEMA.md) (record, kinds, threads, registry)
+**Version:** 0.1 (2026-09-25) · **Status:** v0.1, in use · **Companion:** [SCHEMA.md](SCHEMA.md) (record, kinds, threads, registry)
 
-SCHEMA.md says what a record is and what each kind obligates. This document says how the log is driven: who may speak when, how obligations play out in time, how each participant sees the log, and how repository edits become records. §8 is the block that becomes `CLAUDE.md` / `AGENTS.md` / the small model's system prompt; nothing else in this file is shown to agents.
+SCHEMA.md says what a record is and what each kind obligates. This document says how the log is driven: who may speak when, how obligations play out in time, how each participant sees the log, and how repository edits become records. §8 is the block that becomes `CLAUDE.md` / `AGENTS.md` / the small model's system prompt; nothing else in this file is shown to agents. §10 is how the chair operates it: one command, `parley`.
 
-MUST / SHOULD / MAY as in RFC 2119. "The chair" is the one human with `role: chair`. "Agents" are model participants. "The dispatcher" is the appender process (SCHEMA §1, rule 2); during the manual week the chair is the dispatcher.
+MUST / SHOULD / MAY as in RFC 2119. "The chair" is the one human with `role: chair`. "Agents" are model participants. "The dispatcher" is the appender process (SCHEMA §1, rule 2): `parley run`.
 
 ---
 
@@ -13,7 +13,7 @@ MUST / SHOULD / MAY as in RFC 2119. "The chair" is the one human with `role: cha
 - **Participants** are in the registry (SCHEMA §5). One chair; any number of agents; tool participants that only `say`.
 - **The log** is the single shared state (SCHEMA §1). Each agent's context — a resumed CLI session, a chat history — is a cache. Every turn begins by bringing the cache up to date with a *projection* (§5) and ends with records the appender writes.
 - **A turn** is one invocation of one participant: one projection in, zero or more records out, appended contiguously with the same `seen` (SCHEMA §2.4). An agent's turn may take twenty minutes and a hundred tool calls; the protocol sees only its records.
-- **A round** is one cycle of the dispatcher: compute who may speak (§3), invoke all of them concurrently, append their turns in arrival order, run the objection pass (§3.5), repeat until no agent may speak, then hand the chair its queue (§4.2). Agents never wait for the chair except at a decision; the chair gets decisions batched.
+- **A round** is one cycle of the dispatcher: compute who may speak (§3), invoke all of them concurrently, append their turns in arrival order, run the objection pass (§3.5), repeat until no agent may speak, then hand the chair its queue (§4.2). Agents never wait for the chair except at a decision; the chair gets decisions batched. A run is capped at 20 agent rounds between chair turns (`parley run --rounds N`), because two agents can nominate each other indefinitely and every round costs real invocations.
 - **Time** is asymmetric by orders of magnitude: agents answer in minutes, the chair in hours. Every rule below is shaped by that.
 
 ---
@@ -22,7 +22,7 @@ MUST / SHOULD / MAY as in RFC 2119. "The chair" is the one human with `role: cha
 
 Exactly one writer. It receives each turn's records, normalizes them (SCHEMA §2.3), validates them (SCHEMA §6), and appends the turn whole — or rejects the turn whole and tells the author why (§5.4). It also stamps `seen`, which makes the log a record of what each author knew when it spoke.
 
-In the manual week the chair is the appender: paste the projection, take the fenced JSONL back, stamp `id`/`ts`/`seen`, append, run `tools/validate.py .parley`. §10 is the checklist.
+The appender is `tools/parleylib/core.py` (`Parley.append_turn`); the chair's own records go through it too, via `parley ask|say|propose|accept|object|decide` (§10). Chair commands and a running dispatcher may append at the same time; a file lock serializes them and every turn is validated against the log as it is at that moment.
 
 ---
 
@@ -64,7 +64,7 @@ The chair's records are valid at any moment and need no basis. The dispatcher fo
 
 "Anyone may speak unbidden only to object" needs a mechanism, because agents see records only when invoked. So after each batch of turns is appended, the dispatcher runs an **objection pass**: every agent that has unseen visible records and no other basis to speak is invoked once with its delta and a standing block that says *you owe nothing; object, or emit nothing*. Cost: one short invocation per idle agent per pass. For budgeted participants the output grammar is narrowed to "an `object` or an empty record list" (§5.3).
 
-Objections nominate their targets' authors, which feeds the next dispatch; the pass repeats until it produces no records. A per-round pass limit (dispatcher config, default 3) guards against agents objecting to each other's objections forever; when it is hit the dispatcher appends a `say` and the round ends with the chair informed.
+Objections nominate their targets' authors, which feeds the next dispatch; the pass repeats until it produces no records, at most three times per round. An agent that starts a fresh session every turn (§5.5) receives the whole visible log, so in its projection the records it has not been shown before are marked `(new)` and the pass asks it to object only to those; a resumed session receives just the delta, which is all new by construction.
 
 This is the structural half of "disagreement is mandatory": the reviewer obligation forces a position on every proposal, and the objection pass guarantees every record is *seen* by every agent while objecting is still cheap.
 
@@ -103,7 +103,7 @@ Deadlines come from the registry's latency class and apply to the dispatcher's *
 
 Obligations never expire. Only a `decide` voids them.
 
-A turn the appender rejects (schema or protocol violation, or an owing participant that ignored what it owes) is re-run **once** with the validator's message appended to the same projection. If it fails again, the dispatcher appends a `say` naming the error codes (not the content), visible to all, and moves on; the author still owes. Repeated failure shows up in the chair's queue as a stuck obligation, which the chair clears by `decide` (void) or by `ask`ing someone else.
+A turn the appender rejects (schema or protocol violation, or an owing participant that ignored what it owes) is re-run **once** with the validator's message appended to the same projection. If it fails again, the dispatcher appends a `say` naming the error codes (not the content), visible to all, and moves on; the author still owes. After two consecutive failed turns (timeouts included) a participant is not invoked again until the chair has appended something, so a broken harness cannot burn a run. Stuck obligations show in the chair's queue; the chair clears them by `decide` (void) or by `ask`ing someone else.
 
 ---
 
@@ -113,7 +113,7 @@ A projection is how a participant reads the log: the visible delta since its las
 
 ### 5.1 The delta and its rendering
 
-**Input:** the log, the registry, the participant *P*, and `since` = the `seen` of *P*'s last turn — or, if *P*'s last invocation produced no records (an objection pass, say), the last record that invocation was shown; the dispatcher tracks this, the chair does in the manual week.
+**Input:** the log, the registry, the participant *P*, and `since` = the last record *P* was shown (`.parley/state.json`), which equals the `seen` of *P*'s last turn whenever that turn produced records.
 
 **Delta:** every record visible to *P* whose position is after `since`, in file order. Exclusive of `since`. It includes *P*'s own records, marked `(self)`: the log is the truth, and the agent should see what actually landed — the ids the appender assigned, the `tmp-` ids rewritten, and nothing that was rejected.
 
@@ -136,7 +136,7 @@ reasons:
 Accepting 013 as the implementation of 004.
 ```
 
-Header grammar: `[#id]` · `(self)` if `from == P` · `kind` · `from=` · `to=` (`*` or ids, always shown) · `re=#a,#b` if any · `thread=#root` · `next=ids` if any · `vis=ids` if not `*`. Timestamps are omitted (available on request); ids are always written with `#` so agents copy the form they are shown. Bodies: `text` verbatim; `reasons` as a bulleted list; `quote` as a `>` line above the reasons; `change` per §7.6.
+Header grammar: `[#id]` · `(self)` if `from == P` · `(new)` in a full-log projection for records *P* has not been shown before (a delta has no marker; everything in it is new) · `kind` · `from=` · `to=` (`*` or ids, always shown) · `re=#a,#b` if any · `thread=#root` · `next=ids` if any · `vis=ids` if not `*`. Timestamps are omitted (available on request); ids are always written with `#` so agents copy the form they are shown. Bodies: `text` verbatim; `reasons` as a bulleted list; `quote` as a `>` line above the reasons; `change` per §7.6.
 
 ### 5.2 The standing block
 
@@ -187,20 +187,20 @@ A participant with `context_budget` set gets a **summarized projection**:
 For every agent, whatever the harness:
 
 1. **Output** is one fenced block, ```` ```jsonl ````, containing zero or more records, one per line. Prose outside the fence is ignored (CLIs narrate; the fence is what is parsed). No fence, or an empty one, means "nothing to say" and is legal only when the agent owes nothing.
-2. **Per record:** `kind`, `thread`, `body`, and `re` as appropriate; `to` on every `ask`; `next` and `visibility` when wanted. `id`, `ts`, `seen` are the appender's; they are ignored if present, except provisional ids.
+2. **Per record:** `kind`, `thread`, `body`, and `re` as appropriate; `to` on every `ask`; `next` and `visibility` when wanted. `id`, `ts`, `seen` are the appender's; they are ignored if present, except provisional ids. A record without `thread` is placed in the thread of its first `re` target, or roots a new thread if it has none.
 3. **Provisional ids** `tmp-<n>` may be used in `id`, `thread` and `re` within one turn; the appender rewrites them. A new thread is `"id": "tmp-1", "thread": "tmp-1"`.
 4. **Validation** is whole-turn (SCHEMA §2.3). A rejected turn is re-run once with the error; then logged (§4.3).
 5. **Owed records** must each appear in the `re` of some record in the turn, if only a `say` explaining the delay (§4.1).
 
 ### 5.5 Per harness
 
-**Claude Code** (`harness: claude-code`). Invoked in its worktree, non-interactively, with the projection as the prompt (`claude -p "$(…project.py --for claude --since …)"` with JSON output) and the participant's session resumed (`--resume <id>`, one session per participant, tracked by the dispatcher) so that the delta is the right increment. No resumable session → cold join (§5.6). Protocol rules arrive via the generated `CLAUDE.md` in the worktree (§9). Permissions are configuration, not protocol: it needs to read, edit and commit in its own worktree and run the project's tests; it must not be able to write outside it. The final assistant message's fenced block is the turn.
+**Claude Code** (`harness: claude-code`). Invoked in its worktree as `claude -p --output-format json` with the projection on stdin and the participant's session resumed (`--resume <id>`; the id comes back in the JSON envelope and is kept in `.parley/state.json`), so the delta is the right increment; `session: fresh` sends the whole visible log instead. Protocol rules arrive via the generated `CLAUDE.md` in the worktree (§9). Default flags: `--permission-mode acceptEdits --allowedTools "Bash(git:*)"` — edits and git in its own worktree; anything else is denied rather than asked about, since nobody is there to answer. Widen `harness_args` per project (`"Bash(lake:*)"`, `"Bash(pytest:*)"`); the no-permission flag is the chair's explicit choice, never a default. The `result` field of the envelope is the reply; its fenced block is the turn.
 
-**Codex** (`harness: codex-cli`). Same shape: `codex exec` in its worktree with the projection as the prompt, last message captured to a file (`-o`) or via JSON events; session resumed where the CLI supports it, else cold join; rules via generated `AGENTS.md`; sandbox scoped to its worktree.
+**Codex** (`harness: codex-cli`). `codex exec -C <worktree> -o <file> … "<projection>"`; the last message lands in the file. Default `session: fresh` (whole visible log each turn, `(new)` marks); `session: resume-last` uses `codex exec resume --last` where the CLI supports it. Rules via the generated `AGENTS.md`. Default flags: `--full-auto` (workspace-write sandbox) plus `-c sandbox_workspace_write.writable_roots=["<repo>/.git"]`, because a worktree's git directory lives under the main repository's `.git` and commits would otherwise be blocked by the sandbox.
 
 **llama.cpp** (`harness: llama-server`). One chat completion per turn against `/v1/chat/completions`: system = the §8 block in its compact form plus the participant header; user = the summarized projection (§5.3); `response_format` = the narrowed schema; low temperature; a capped `max_tokens`. There is no session — every turn is a cold join, which is what the summarized projection is for. Typical registry: `capabilities: []`, `context_budget` set, `inline_diff_lines: 0`, `latency: seconds`.
 
-**The chair** reads the chair block (§5.2), queue first, and writes records in whatever way is convenient — by hand as JSON in the manual week, via a small `parley say`-style helper once one exists.
+**The chair** reads the chair block (§5.2), queue first — it is what `parley run` prints when it stops and what `parley status` prints any time — and writes records with `parley ask|say|propose|accept|object|decide` or at the `parley run -i` prompt (§10).
 
 ### 5.6 Cold joins
 
@@ -249,7 +249,7 @@ The chair fast-forwards or merges into `main`, squashing if it wants, and the `d
 
 ### 7.5 Rebase
 
-Before invoking a repo-capable agent, the dispatcher rebases its branch onto `main` in its worktree. Clean: nothing is logged. Conflict: a `dispatch` `say`, visible to that agent and the chair, is placed at the top of its projection naming the files, and resolving it is the first thing the agent does in that turn. In the manual week the chair tells the agent to rebase, or does it.
+Before invoking a repo-capable agent, the dispatcher rebases its branch onto `main` in its worktree. Clean: nothing is logged. Conflict: the rebase is aborted and a `dispatch` `say`, visible to that agent and the chair, names the files; it is in the agent's next projection and resolving it is the first thing the agent does in that turn (`parley run --no-rebase` turns this off).
 
 ### 7.6 Rendering a change
 
@@ -333,37 +333,46 @@ You are one participant in a **parley**: one human chair and several agents work
 
 ## 9. Generated documents
 
-`CLAUDE.md`, `AGENTS.md` and the llama system prompt are generated from §8 and never hand-maintained. The generator (`tools/gen-agent-docs.py`, next after `project.py`):
+`CLAUDE.md`, `AGENTS.md` and the llama system prompt are generated from §8 and never hand-maintained. The generator, `tools/gen-agent-docs.py` (run by `parley init` and `parley gen-docs`):
 
 1. extracts the text between `<!-- parley:agent-rules:begin -->` and `<!-- parley:agent-rules:end -->`;
-2. prepends a participant header: `You are <id>. Branch parley/<id>, worktree <path>. Chair: <id>. Log: .parley/log.jsonl.`;
-3. writes it into a marker-delimited region of `CLAUDE.md` (for `claude-code`) or `AGENTS.md` (for `codex-cli`) in that participant's worktree, creating the file if absent and preserving anything outside the markers, under a banner `GENERATED from PROTOCOL.md §8 — edit there`; for `llama-server` it writes `.parley/system-<id>.txt`;
-4. runs on every merge to `main` that touches PROTOCOL.md.
+2. prepends a participant header — id, model, chair and base branch, own branch and worktree, the log path, the absolute path of this spec — and, when the base branch is not `main`, substitutes the actual base branch into the rules;
+3. writes it into a marker-delimited region of `CLAUDE.md` (for `claude-code`) or `AGENTS.md` (for `codex-cli`) in that participant's worktree (`--out DIR` to redirect, `--stdout` to inspect), creating the file if absent and preserving anything outside the markers, under a banner `GENERATED from PROTOCOL.md §8 — edit there`; for `llama-server` it writes `.parley/system-<id>.txt`;
+4. is re-run after any change to PROTOCOL.md (`parley gen-docs`).
 
 Hand edits inside the markers are overwritten without notice; that is the point.
 
 ---
 
-## 10. The manual week
+## 10. Operating it
 
-The spec is driven by hand on real work before any dispatcher exists. Setup:
+Everything the chair does is one command, `tools/parley` (put it on your PATH: `ln -s ~/git/parley/tools/parley ~/bin/parley`). It works on any repository; the spec and the tools stay in the parley repo.
+
+Setting up a repository:
 
 ```sh
-mkdir .parley && cp transcripts/example-01.participants.json .parley/participants.json   # edit ids/models
-: > .parley/log.jsonl
-git worktree add ../parley-claude -b parley/claude
-git worktree add ../parley-codex  -b parley/codex
+parley init --repo ~/research/anabelian     # .parley/, worktrees ../anabelian-claude ../anabelian-codex, CLAUDE.md / AGENTS.md
+parley --repo ~/research/anabelian doctor   # binaries on PATH, worktrees present, docs generated
 ```
 
-Per turn, the chair is the dispatcher:
+The loop, from inside the repository (or with `--repo`):
 
-1. **Project.** Build the delta for the agent (by hand at first, `tools/project.py` once it exists): header line + body per record since its last `seen`, then the standing block — `tools/validate.py .parley --report` prints the facts it is built from.
-2. **Invoke.** Paste it into the agent's CLI in its worktree (interactive session or `claude -p` / `codex exec`). The agent's rules come from the generated `CLAUDE.md` / `AGENTS.md`; until the generator exists, paste §8 once at the top of the session.
-3. **Append.** Take the ```` ```jsonl ```` block, stamp `id`, `ts`, `seen` (the last id you showed it), rewrite `tmp-` ids, append, run `tools/validate.py .parley`. If it fails, show the agent the error once; if it fails again, log a `say` and move on.
-4. **Objection pass.** When nobody owes anything, paste the delta to each idle agent with *you owe nothing; object or emit nothing*.
-5. **Decide.** Work the queue from `--report`: ready threads get a `decide`; merge by hand; the decide's `change` names the landed commit.
+```sh
+parley ask claude "<the task>"       # your record; claude now owes a reply
+parley run                           # rounds until it is your turn; prints your queue and stops
+parley decide 001 "<ruling>"         # or ask / object / say / propose / accept — see parley -h
+parley run                           # … and so on.   parley run -i keeps a prompt open instead.
+```
 
-Keep `notes/manual-week.md` and write down every place the protocol got in the way. The things to watch for, because they decide v0.2: a record that wanted a seventh kind; an obligation that was tedious to discharge; a projection that was too long or too short; a moment where the chair was a bottleneck the rules created rather than the work.
+What `parley run` does each round (§1, §3): derives from the log who may speak; invokes all of them concurrently, each in its own worktree, rebased onto the base branch first; validates and appends each turn whole; runs the objection pass; stops when only you may speak. It never asks you anything mid-round — timeouts, rejected turns and rebase conflicts become `dispatch` records and appear in your queue as *stuck*. `parley status` prints the queue at any time; `parley validate` the full report; `parley project --for codex` exactly what codex would be sent; `parley run --dry-run` every projection that would go out, sending nothing.
+
+Permissions are the chair's. The defaults (§5.5) keep each CLI's own sandbox on, so a first run in a new project will typically show an agent saying it could not run the tests; add what the project needs to that participant's `harness_args` in `.parley/participants.json` and run again. `harness_args` replaces the defaults, so include the ones you want to keep.
+
+Cost: at most one CLI invocation per agent per round, plus one short invocation per idle agent per objection pass; a run stops after 20 agent rounds without a chair turn (`--rounds`).
+
+Kept outside the log, git-ignored by `parley init`: `.parley/state.json` (what each participant was last shown, Claude Code session ids — delete it to force cold joins) and `.parley/dispatch.log` (every raw reply, for when a turn goes wrong).
+
+Tests: `tests/test_e2e.sh` drives the whole loop with scripted agents (`tests/fake_agent.py`); `tests/test_adapters.py` covers the CLI adapters' command lines and parsing.
 
 ---
 

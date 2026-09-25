@@ -56,7 +56,23 @@
           "default": 80,
           "description": "Diffs at or under this many lines are inlined in this participant's projection; larger ones are referenced."
         },
-        "notes": { "type": "string" }
+        "notes": { "type": "string" },
+        "command": {
+          "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" }, "minItems": 1 }],
+          "description": "Harness knob: executable (or argv prefix) that invokes this participant. Defaults: claude, codex. For harness `command`, the program that reads a projection on stdin and prints records."
+        },
+        "harness_args": {
+          "type": "array", "items": { "type": "string" },
+          "description": "Harness knob: extra arguments appended to the invocation (permissions, sandbox, model flags)."
+        },
+        "session": {
+          "enum": ["resume", "fresh", "resume-last"],
+          "description": "Harness knob: resume the participant's CLI session between turns (delta projections) or start fresh each turn (full-log projections)."
+        },
+        "timeout_s": { "type": "integer", "minimum": 1, "description": "Harness knob: per-turn wall-clock limit; overrides the latency-class default." },
+        "endpoint": { "type": "string", "description": "Harness knob (llama-server): chat-completions URL." },
+        "max_tokens": { "type": "integer", "minimum": 1 },
+        "temperature": { "type": "number", "minimum": 0 }
       },
       "allOf": [
         {

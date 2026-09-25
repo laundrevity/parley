@@ -1,6 +1,6 @@
 # parley — SCHEMA
 
-**Version:** 0.1 (2026-09-25) · **Status:** draft for the manual week · **Companion:** [PROTOCOL.md](PROTOCOL.md) (turn-taking, projections, edits)
+**Version:** 0.1 (2026-09-25) · **Status:** v0.1, in use · **Companion:** [PROTOCOL.md](PROTOCOL.md) (turn-taking, projections, edits)
 
 This document defines the log format: what a record is, what each kind obligates, what a thread is, and who the participants are. PROTOCOL.md defines how the log is driven. `schema/record.schema.json` and `schema/participants.schema.json` are the canonical machine-readable shapes; `tools/validate.py` is the reference check for everything the schemas cannot say. If this text and the schema files disagree, the files win and the text is a bug.
 
@@ -20,7 +20,7 @@ A **parley** is a directory containing two files. Convention: `.parley/` at the 
 Rules:
 
 1. **The log is the truth.** Every participant's context is a cache of it. Nothing that is not in the log happened, as far as the other participants are concerned.
-2. **Single appender.** Exactly one process writes `log.jsonl`: the dispatcher, or the chair during the manual week. Agents never write it. They emit records (PROTOCOL §5.4); the appender validates, normalizes (§2.3) and appends.
+2. **Single appender.** Exactly one code path writes `log.jsonl`: the appender (`tools/parleylib/core.py`), used by the dispatcher for agents' turns and by the `parley` command for the chair's. Agents never write it. They emit records (PROTOCOL §5.4); the appender validates, normalizes (§2.3) and appends.
 3. **File order is the canonical total order.** `ts` is informational. Threading (`re`, `thread`) and causality (`seen`) are layered on top of file order; they never reorder it.
 4. **Append-only.** No record is edited or deleted. A correction is a new record.
 5. **A turn is appended whole.** All records of one turn (§2.4) are contiguous in the file.
@@ -182,6 +182,7 @@ Two turns are **concurrent** iff neither author had seen the other's records: tu
 | `context_budget` | integer | — | Approximate tokens per projection. Participants with a budget receive summarized projections (PROTOCOL §5.3). |
 | `inline_diff_lines` | integer | default 80 | Diffs at or under this length are inlined in the participant's projection; longer ones are referenced. |
 | `notes` | string | — | Free text. |
+| `command`, `harness_args`, `session`, `timeout_s`, `endpoint`, `max_tokens`, `temperature` | — | — | Harness knobs read by the dispatcher, not by the protocol: how to invoke the participant, whether to resume its CLI session between turns (`resume` → delta projections) or start fresh (`fresh` → the whole visible log each turn), the per-turn wall-clock limit, and llama-server settings. `tools/parleylib/harness.py` documents them. |
 
 Example (the three-party registry used by `transcripts/example-01.jsonl` plus the two participants the dispatcher phase adds):
 
