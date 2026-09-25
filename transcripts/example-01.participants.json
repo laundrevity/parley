@@ -1,0 +1,36 @@
+{
+  "name": "example-01: tools/project.py",
+  "participants": [
+    {
+      "id": "conor",
+      "kind": "human",
+      "role": "chair",
+      "harness": "human",
+      "latency": "human",
+      "capabilities": ["repo", "shell", "web"],
+      "branch": "main"
+    },
+    {
+      "id": "claude",
+      "kind": "model",
+      "model": "claude-fable-5-1",
+      "harness": "claude-code",
+      "latency": "minutes",
+      "capabilities": ["repo", "shell", "web"],
+      "worktree": "../parley-claude",
+      "branch": "parley/claude",
+      "inline_diff_lines": 80
+    },
+    {
+      "id": "codex",
+      "kind": "model",
+      "model": "gpt-5-codex",
+      "harness": "codex-cli",
+      "latency": "minutes",
+      "capabilities": ["repo", "shell"],
+      "worktree": "../parley-codex",
+      "branch": "parley/codex",
+      "inline_diff_lines": 80
+    }
+  ]
+}

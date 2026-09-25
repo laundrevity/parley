@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/laundrevity/parley/main/schema/participants.schema.json",
+  "title": "parley participant registry",
+  "description": "participants.json: who is in the parley. Exactly one participant has role chair, and the chair is human (enforced by tools/validate.py, not expressible here).",
+  "type": "object",
+  "required": ["participants"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "description": "Optional label for this parley." },
+    "participants": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/$defs/participant" }
+    }
+  },
+  "$defs": {
+    "participantId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "participant": {
+      "type": "object",
+      "required": ["id", "kind", "latency"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/participantId" },
+        "kind": { "enum": ["human", "model", "tool"] },
+        "role": { "enum": ["chair", "member"], "default": "member" },
+        "model": { "type": "string", "description": "Model string as the harness reports it. Required for kind model." },
+        "harness": {
+          "type": "string",
+          "description": "How this participant is invoked: claude-code, codex-cli, llama-server, human, dispatch, ... Free-form; the dispatcher keys on it."
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Defined values: repo (has a worktree; can read code and the log directly), shell, web. Others are free-form."
+        },
+        "latency": {
+          "enum": ["human", "minutes", "seconds"],
+          "description": "Sets the dispatcher's per-turn wait and how the projection is budgeted. human: no deadline."
+        },
+        "worktree": { "type": "string", "description": "Path of this participant's git worktree, relative to the chair's checkout." },
+        "branch": { "type": "string", "description": "Branch this participant commits to; convention parley/<id>." },
+        "context_budget": {
+          "type": "integer",
+          "minimum": 512,
+          "description": "Approximate token budget for one projection. Participants with a budget receive summarized projections."
+        },
+        "inline_diff_lines": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 80,
+          "description": "Diffs at or under this many lines are inlined in this participant's projection; larger ones are referenced."
+        },
+        "notes": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "const": "model" } } },
+          "then": { "required": ["model"] }
+        },
+        {
+          "if": { "required": ["role"], "properties": { "role": { "const": "chair" } } },
+          "then": { "properties": { "kind": { "const": "human" } } }
+        }
+      ]
+    }
+  }
+}

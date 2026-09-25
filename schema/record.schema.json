@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/laundrevity/parley/main/schema/record.schema.json",
+  "title": "parley record",
+  "description": "One speech act in a parley log. A log is JSONL: one record per line, append-only, file order canonical. See SCHEMA.md for semantics; this file checks shape only.",
+  "type": "object",
+  "required": ["id", "ts", "from", "thread", "kind", "body"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/recordId",
+      "description": "Unique within the log. Assigned by the appender; agents may emit provisional ids matching ^tmp-, which the appender rewrites."
+    },
+    "ts": {
+      "type": "string",
+      "description": "RFC 3339 UTC timestamp, e.g. 2026-09-25T19:02:11Z. Informational; ordering is file order.",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "from": {
+      "$ref": "#/$defs/participantId",
+      "description": "Author. Must be a registered participant."
+    },
+    "to": {
+      "$ref": "#/$defs/audience",
+      "default": ["*"],
+      "description": "Addressees: who the act is directed at and (for ask/propose) who incurs an obligation. [\"*\"] = every participant except the author. Never includes the author."
+    },
+    "re": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/recordId" },
+      "uniqueItems": true,
+      "default": [],
+      "description": "Records this one responds to (DAG edges). Must be earlier in the log. May cross threads. One record may discharge several obligations by listing several targets."
+    },
+    "thread": {
+      "$ref": "#/$defs/recordId",
+      "description": "Id of the thread's root record. A root has thread == id."
+    },
+    "kind": {
+      "enum": ["say", "ask", "propose", "accept", "object", "decide"],
+      "description": "The speech act. Fixes the body type and the obligation created or discharged."
+    },
+    "body": {
+      "type": "object",
+      "description": "Typed by kind; see $defs/*Body."
+    },
+    "next": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/participantId" },
+      "uniqueItems": true,
+      "default": [],
+      "description": "Nominations: who the author wants to speak next. A nomination is consumed when the nominee takes a turn. Empty means none (the floor is derived, see PROTOCOL.md)."
+    },
+    "seen": {
+      "oneOf": [{ "$ref": "#/$defs/recordId" }, { "type": "null" }],
+      "description": "Id of the last record in the author's projection when this turn began; null for a first turn with an empty log. Stamped by the appender. Two records are concurrent iff neither author had seen the other's record."
+    },
+    "visibility": {
+      "$ref": "#/$defs/audience",
+      "default": ["*"],
+      "description": "Who may see this record. [\"*\"] = everyone. The chair always sees everything. Addressees and nominees must be viewers."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["kind"], "properties": { "kind": { "const": "say" } } },
+      "then": { "properties": { "body": { "$ref": "#/$defs/sayBody" } } }
+    },
+    {
+      "if": { "required": ["kind"], "properties": { "kind": { "const": "ask" } } },
+      "then": {
+        "required": ["to"],
+        "properties": { "body": { "$ref": "#/$defs/askBody" } }
+      }
+    },
+    {
+      "if": { "required": ["kind"], "properties": { "kind": { "const": "propose" } } },
+      "then": { "properties": { "body": { "$ref": "#/$defs/proposeBody" } } }
+    },
+    {
+      "if": { "required": ["kind"], "properties": { "kind": { "const": "accept" } } },
+      "then": {
+        "required": ["re"],
+        "properties": {
+          "re": { "minItems": 1 },
+          "body": { "$ref": "#/$defs/acceptBody" }
+        }
+      }
+    },
+    {
+      "if": { "required": ["kind"], "properties": { "kind": { "const": "object" } } },
+      "then": {
+        "required": ["re"],
+        "properties": {
+          "re": { "minItems": 1 },
+          "body": { "$ref": "#/$defs/objectBody" }
+        }
+      }
+    },
+    {
+      "if": { "required": ["kind"], "properties": { "kind": { "const": "decide" } } },
+      "then": { "properties": { "body": { "$ref": "#/$defs/decideBody" } } }
+    }
+  ],
+  "$defs": {
+    "recordId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "participantId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "audience": {
+      "oneOf": [
+        { "const": ["*"] },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/participantId" },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      ]
+    },
+    "change": {
+      "type": "object",
+      "description": "A reference to repository state. Either a commit (on a branch the others can fetch) or an inline unified diff; both allowed.",
+      "additionalProperties": false,
+      "properties": {
+        "repo": { "type": "string", "description": "Only when the parley spans more than one repository." },
+        "branch": { "type": "string" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+        "files": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "diff": { "type": "string", "description": "Unified diff. For participants without repo access, or for a patch that is not committed anywhere." }
+      },
+      "anyOf": [{ "required": ["commit"] }, { "required": ["diff"] }]
+    },
+    "text": { "type": "string", "minLength": 1 },
+    "reasons": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "description": "One entry per reason. Each must be checkable: what was examined and what was found."
+    },
+    "sayBody": {
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "$ref": "#/$defs/text" },
+        "change": { "$ref": "#/$defs/change" }
+      }
+    },
+    "askBody": {
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "$ref": "#/$defs/text" }
+      }
+    },
+    "proposeBody": {
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "$ref": "#/$defs/text" },
+        "change": { "$ref": "#/$defs/change" }
+      }
+    },
+    "acceptBody": {
+      "type": "object",
+      "required": ["reasons"],
+      "additionalProperties": false,
+      "properties": {
+        "reasons": { "$ref": "#/$defs/reasons" },
+        "text": { "$ref": "#/$defs/text" }
+      }
+    },
+    "objectBody": {
+      "type": "object",
+      "required": ["reasons"],
+      "additionalProperties": false,
+      "properties": {
+        "reasons": { "$ref": "#/$defs/reasons" },
+        "quote": { "type": "string", "minLength": 1, "description": "Verbatim text from the record objected to. Paraphrase is where distortion hides." },
+        "text": { "$ref": "#/$defs/text" }
+      }
+    },
+    "decideBody": {
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "$ref": "#/$defs/text", "description": "The ruling, with rationale." },
+        "change": { "$ref": "#/$defs/change", "description": "The merge (or revert) commit on main, when the decision landed code." }
+      }
+    }
+  }
+}
