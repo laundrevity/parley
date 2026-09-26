@@ -1,11 +1,13 @@
 """The dispatcher: PROTOCOL.md §1 (rounds), §3 (floor), §3.5 (objection pass), §4.3
 (timeouts and failed turns), §5 (projections), §7.5 (rebase).
 
-One round: everyone who may speak is invoked concurrently, each with its own projection;
-their turns are appended in arrival order; then the objection pass gives every agent with
-unseen records one chance to object. When no agent may speak and the pass is quiet, it is
-the chair's turn: the chair's block is printed and the dispatcher stops (or hands the
-prompt to the chair in interactive mode).
+One round: everyone who may speak and can be invoked is invoked concurrently, each with its
+own projection; their turns are appended in arrival order; then the objection pass gives
+every model with unseen records one chance to object. Participants are humans, models or
+programs alike; the only distinction the dispatcher makes is *how to reach them*: a model
+through its harness, a human through a prompt or an inbox file — or, in the default `exit`
+mode, by stopping the run and printing their standing block. When nobody who can be reached
+may speak, the run ends: at the humans' turn, or quiescent.
 """
 from __future__ import annotations
 
@@ -18,10 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
 from . import core, harness
-
-sys.path.insert(0, core.TOOLS_DIR)
-import project as P  # noqa: E402
-import validate as V  # noqa: E402
+from . import project as P
+from . import validate as V
 
 MAX_CONSECUTIVE_FAILURES = 2
 DEFAULT_ROUND_CAP = 20
@@ -43,12 +43,49 @@ class Dispatcher:
         self.git_enabled = git_enabled
         self.max_passes = max_passes
         self.state_lock = threading.Lock()
+        self.interrupted = False
+        self.me: Optional[str] = None                 # the participant at this keyboard, if any
+        self.human_prompt: Optional[Callable] = None  # (pid, projection) -> records appended
+        self.waiting: list = []                       # humans whose turn it is when the run stops
         self.record_schema = V.load_json(os.path.join(core.SCHEMA_DIR, "record.schema.json"))
 
     # ------------------------------------------------------------------ helpers
     def agents(self) -> list:
         ps = self.parley.agents()
         return [p for p in ps if not self.only or p["id"] in self.only]
+
+    def participants(self) -> list:
+        """Everyone who can hold the floor: humans and models (tools only ever `say` via note())."""
+        ps = [p for p in self.parley.registry["participants"] if p.get("kind") in ("human", "model")]
+        return [p for p in ps if not self.only or p["id"] in self.only]
+
+    @staticmethod
+    def human_mode(p: dict) -> str:
+        return p.get("mode", "exit") if p.get("kind") == "human" else ""
+
+    def invocable(self, p: dict) -> bool:
+        """Can the dispatcher reach this participant itself, right now?"""
+        if p.get("kind") == "model":
+            return True
+        mode = self.human_mode(p)
+        if mode == "inbox":
+            return True
+        if mode == "prompt":
+            return self.human_prompt is not None and p["id"] == self.me
+        return False
+
+    def has_unseen(self, p: dict, records: list, st: dict) -> bool:
+        return self.parley.pstate(st, p["id"]).get("last_shown") != self.parley.last_visible_id(p["id"], records)
+
+    def wants_turn(self, p: dict, rp, records: list, st: dict) -> bool:
+        pid = p["id"]
+        if rp.open_for(pid):
+            return True
+        # a nomination or a ready thread is an invitation, not a debt: a model is asked once per new record,
+        # and one that answers with nothing is not asked again until the log has grown (humans always wait)
+        if rp.nominations.get(pid) or (pid in rp.chairs and rp.chair_queue):
+            return p.get("kind") == "human" or self.has_unseen(p, records, st)
+        return False
 
     def with_state(self, fn):
         with self.state_lock:
@@ -74,12 +111,12 @@ class Dispatcher:
         if ps.get("failures", 0) < MAX_CONSECUTIVE_FAILURES:
             return False
         failed_at = ps.get("failed_at")
-        chair = self.parley.chair
-        # released once the chair has said anything after the failures
+        releasers = set(self.parley.chairs) | {h["id"] for h in self.parley.humans()}
+        # released once a chair or a human has said anything after the failures
         for r in reversed(records):
             if r.id == failed_at:
                 break
-            if r.frm == chair:
+            if r.frm in releasers:
                 ps["failures"] = 0
                 return False
         return True
@@ -123,30 +160,41 @@ class Dispatcher:
             return 0
 
         system_prompt = ""
-        if p.get("harness") == "llama-server":
-            sp = os.path.join(parley.dir, f"system-{pid}.txt")
-            system_prompt = open(sp, encoding="utf-8").read() if os.path.exists(sp) else ""
+        # every participant that has no CLAUDE.md / AGENTS.md of its own gets the rules with the turn
+        if p.get("harness") not in ("claude-code", "codex-cli") or not wt:
+            from . import gendocs
+            log_rel = os.path.relpath(parley.log_path, parley.repo)
+            system_prompt = gendocs.render_rules(p, parley.registry, log_rel=log_rel)
 
         what = ("objection pass" if mode == "objection" else
-                ("owes " + ", ".join("#" + x for x in owed) if owed else "nominated"))
+                ("owes " + ", ".join("#" + x for x in owed) if owed else
+                 ("decide queue" if pid in rp.chairs and rp.chair_queue else "nominated")))
         eprint(f"  {pid}: invoking ({what}; since #{since or 'start'})")
         parley.log_event(f"INVOKE {pid} mode={mode} since={since} last_visible={last_visible}")
 
-        res = harness.run_turn(p, projection, wt, ps0, mode=mode, system_prompt=system_prompt,
-                               record_schema=self.record_schema, repo=parley.repo)
-        parley.log_event(f"REPLY {pid} elapsed={res.elapsed:.0f}s error={res.error!r} note={res.note!r}\n{res.raw}\n")
+        if p.get("kind") == "human" and self.human_mode(p) == "prompt" and pid == self.me and self.human_prompt:
+            n = self.human_prompt(pid, projection)
+            self.with_state(lambda st: self._ok(parley.pstate(st, pid), last_visible, None))
+            return n
+
+        res = harness.run_turn(p, projection, wt or parley.repo, ps0, mode=mode, system_prompt=system_prompt,
+                               record_schema=self.record_schema, repo=parley.repo, state_dir=parley.dir)
+        parley.log_event(f"REPLY {pid} elapsed={res.elapsed:.0f}s error={res.error!r} note={res.note!r} cmd={res.cmd!r}\n{res.raw}\n")
 
         if res.records is None:
             eprint(f"  {pid}: FAILED — {res.error}")
             self.fail(pid, last_visible, f"{pid}: {res.error}", owed)
             return 0
 
-        appended = self.try_append(p, res, projection, last_visible, owed, mode)
+        appended = self.try_append(p, res, projection, last_visible, owed, mode, system_prompt)
         if appended is None:
             return 0
         self.with_state(lambda st: self._ok(parley.pstate(st, pid), last_visible, res.session_id))
         ids = [d["id"] for d in appended]
-        eprint(f"  {pid}: {len(appended)} record(s) appended{(' ' + ', '.join('#' + i for i in ids)) if ids else ''} in {res.elapsed:.0f}s")
+        if not appended and not owed:
+            eprint(f"  {pid}: nothing to add in {res.elapsed:.0f}s (invited, not owing; not asked again until the log grows)")
+        else:
+            eprint(f"  {pid}: {len(appended)} record(s) appended{(' ' + ', '.join('#' + i for i in ids)) if ids else ''} in {res.elapsed:.0f}s")
         return len(appended)
 
     @staticmethod
@@ -158,6 +206,9 @@ class Dispatcher:
             ps["session_id"] = session_id
 
     def fail(self, pid: str, last_visible, text: str, owed: list) -> None:
+        if self.interrupted:
+            self.parley.log_event(f"INTERRUPTED {pid}: {text}")
+            return
         def mark(st):
             ps = self.parley.pstate(st, pid)
             ps["failures"] = ps.get("failures", 0) + 1
@@ -168,7 +219,8 @@ class Dispatcher:
         if n >= MAX_CONSECUTIVE_FAILURES:
             eprint(f"  {pid}: {n} consecutive failures; will not be invoked again until the chair speaks")
 
-    def try_append(self, p: dict, res: harness.TurnResult, projection: str, last_visible, owed: list, mode: str):
+    def try_append(self, p: dict, res: harness.TurnResult, projection: str, last_visible, owed: list, mode: str,
+                   system_prompt: str = ""):
         """Validate and append, with one retry on rejection or on ignoring what is owed.
         Returns the appended dicts, or None on final failure (state marked)."""
         pid = p["id"]
@@ -189,14 +241,15 @@ class Dispatcher:
                     return parley.append_turn(pid, recs, seen=last_visible)
                 except core.TurnRejected as e:
                     problem = ("Your previous reply was rejected by the validator:\n" +
-                               "\n".join(f"- {f.code}: {f.msg}" for f in e.findings) +
-                               "\nReply again with corrected records (same fence format).")
+                               "\n".join(f"- {f.code}: {f.msg[:300]}" for f in e.findings[:8]) +
+                               "\nReply again with corrected records (same fence format; see the record shapes in your rules).")
                     parley.log_event(f"REJECTED {pid} attempt {attempt}: {e}")
             if attempt == 1:
                 eprint(f"  {pid}: retrying once — {problem.splitlines()[0][:100]}")
                 ps0 = self.with_state(lambda st: dict(parley.pstate(st, pid)))
-                res = harness.run_turn(p, projection + "\n\n" + problem, parley.worktree(p), ps0, mode=mode,
-                                       record_schema=self.record_schema, repo=parley.repo)
+                res = harness.run_turn(p, projection + "\n\n" + problem, parley.worktree(p) or parley.repo, ps0, mode=mode,
+                                       system_prompt=system_prompt,
+                                       record_schema=self.record_schema, repo=parley.repo, state_dir=parley.dir)
                 parley.log_event(f"REPLY(retry) {pid} error={res.error!r}\n{res.raw}\n")
                 if res.records is None:
                     self.fail(pid, last_visible, f"{pid}: {res.error}", owed)
@@ -208,14 +261,20 @@ class Dispatcher:
 
     def do_rebase(self, p: dict, wt: str) -> None:
         base = self.parley.base_branch
-        r = subprocess.run(["git", "rebase", base], cwd=wt, capture_output=True, text=True)
+        g = lambda *a: subprocess.run(["git", *a], cwd=wt, capture_output=True, text=True)
+        if g("merge-base", "--is-ancestor", base, "HEAD").returncode == 0:
+            return                                   # already on top of base; nothing to do
+        r = g("rebase", "--autostash", base)         # autostash: uncommitted work in the worktree survives
         if r.returncode == 0:
             return
-        subprocess.run(["git", "rebase", "--abort"], cwd=wt, capture_output=True, text=True)
-        files = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=wt,
-                               capture_output=True, text=True).stdout.split()
-        msg = (f"rebase of {p.get('branch', p['id'])} onto {base} conflicts"
-               + (f" in {', '.join(files)}" if files else "") + "; resolve it first (rebase aborted).")
+        files = g("diff", "--name-only", "--diff-filter=U").stdout.split()
+        g("rebase", "--abort")
+        if files:
+            msg = (f"rebase of {p.get('branch', p['id'])} onto {base} conflicts in {', '.join(files)}; "
+                   "resolve it first (rebase aborted, your work is untouched).")
+        else:
+            first = (r.stderr or r.stdout).strip().splitlines()
+            msg = f"rebase of {p.get('branch', p['id'])} onto {base} failed: {first[0] if first else 'unknown error'} (aborted)."
         eprint(f"  {p['id']}: {msg}")
         self.note(f"{p['id']}: {msg}", visibility=[p["id"]])
 
@@ -223,8 +282,15 @@ class Dispatcher:
     def invoke_all(self, plist: list, mode: str) -> int:
         if not plist:
             return 0
-        with ThreadPoolExecutor(max_workers=len(plist)) as ex:
+        ex = ThreadPoolExecutor(max_workers=len(plist))
+        try:
             return sum(ex.map(lambda p: self.take_turn(p, mode), plist))
+        except KeyboardInterrupt:
+            self.interrupted = True          # workers still finishing must not record failures
+            eprint("\ninterrupted — waiting for the running turns to stop; nothing will be recorded against them")
+            raise
+        finally:
+            ex.shutdown(wait=True)
 
     def round(self) -> str:
         parley = self.parley
@@ -233,18 +299,22 @@ class Dispatcher:
             return "empty"
         rp = parley.replay(records)
         st = parley.load_state()
-        agents = [p for p in self.agents() if not self.halted(p, records, st)]
+        people = [p for p in self.participants() if not self.halted(p, records, st)]
         parley.save_state(st)
-        permitted = [p for p in agents if rp.open_for(p["id"]) or rp.nominations.get(p["id"])]
-        if permitted:
-            eprint(f"[turns] {', '.join(p['id'] for p in permitted)}")
-            self.invoke_all(permitted, "turn")
+        active = [p for p in people if self.wants_turn(p, rp, records, st)]
+        invoke_now = [p for p in active if self.invocable(p)]
+        self.waiting = [p for p in active if not self.invocable(p)]
+        if invoke_now:
+            eprint(f"[turns] {', '.join(p['id'] for p in invoke_now)}")
+            self.invoke_all(invoke_now, "turn")
             return "turns"
+        if self.waiting:
+            return "human"
         if self.objection_pass:
+            models = [p for p in people if p.get("kind") == "model"]
             for n in range(self.max_passes):
                 st = parley.load_state()
-                cands = [p for p in agents
-                         if parley.pstate(st, p["id"]).get("last_shown") != parley.last_visible_id(p["id"], records)]
+                cands = [p for p in models if self.has_unseen(p, records, st)]
                 if not cands:
                     break
                 eprint(f"[objection pass {n + 1}] {', '.join(p['id'] for p in cands)}")
@@ -252,25 +322,40 @@ class Dispatcher:
                 if appended or self.dry_run:
                     return "objections"
                 records = parley.records()
-        return "chair"
+        return "quiescent"
 
-    def chair_block(self) -> str:
+    def block_for(self, pid: str) -> str:
         records = self.parley.records()
-        pj = P.Projector(records, self.parley.registry, self.parley.chair,
+        pj = P.Projector(records, self.parley.registry, pid,
                          P.Git(self.parley.repo, self.git_enabled, self.parley.base_branch), False)
         return pj.build(None, None, True)
 
+    def chair_block(self) -> str:
+        """The operator's block: --as / the only human / the only chair; else the quiescence report."""
+        pid = self.me or self.parley.chair
+        if pid:
+            return self.block_for(pid)
+        rp = self.parley.replay()
+        ready = sorted(rp.chair_queue)
+        return ("--- quiescent: no obligations open, no one nominated; this parley has no chair ---\n"
+                + ("ready threads (stay open): " + ", ".join("#" + x for x in ready) if ready else "no ready threads"))
+
     def run(self, max_rounds: Optional[int] = None, chair_turn: Optional[Callable[[], bool]] = None) -> str:
-        """Dispatch rounds until it is the chair's turn. max_rounds (default 20) caps the number
-        of agent rounds between chair turns: a runaway agent–agent loop costs real invocations."""
+        """Dispatch rounds until it is a human's turn, or nobody may speak. max_rounds (default 20)
+        caps the number of rounds between human turns: a runaway model–model loop costs real
+        invocations. chair_turn: interactive callback for the operator (returns True if they spoke)."""
         cap = max_rounds or DEFAULT_ROUND_CAP
         rounds = 0
         outcome = "idle"
         while True:
-            outcome = self.round()
+            try:
+                outcome = self.round()
+            except KeyboardInterrupt:
+                eprint("stopped. Nothing was recorded for the interrupted turns; `parley run` picks up where it left off.")
+                return "interrupted"
             rounds += 1
             if outcome == "empty":
-                eprint("the log is empty — start with: parley ask <agent> \"<the task>\"")
+                eprint("the log is empty — start with: parley ask <participant> \"<the task>\"")
                 if chair_turn and chair_turn():
                     continue
                 return outcome
@@ -278,12 +363,18 @@ class Dispatcher:
                 if self.dry_run:
                     return outcome
                 if rounds >= cap:
-                    eprint(f"round cap ({cap}) reached with agents still active; stopping so you can look. "
+                    eprint(f"round cap ({cap}) reached with participants still active; stopping so you can look. "
                            f"`parley status` shows the state; `parley run --rounds N` continues.")
                     print(self.chair_block(), flush=True)
                     return "capped"
                 continue
-            # the chair's turn
+            if outcome == "human":
+                for p in self.waiting:
+                    print(self.block_for(p["id"]), flush=True)
+                if chair_turn and any(p["id"] == self.me for p in self.waiting) and chair_turn():
+                    continue
+                return outcome
+            # quiescent: nothing owed, nobody nominated, nothing to object to
             print(self.chair_block(), flush=True)
             if chair_turn and chair_turn():
                 continue

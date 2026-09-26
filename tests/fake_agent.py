@@ -9,7 +9,8 @@ answers mechanically:
                                 (same thread, re = [my proposal, the objection]); else nothing
   - objection pass           -> `object` to any record whose text contains $FAKE_OBJECT_TO and is not mine; else nothing
 Knobs (environment): FAKE_OBJECT_TO, FAKE_SLEEP (seconds), FAKE_BAD_ONCE (emit an invalid accept the
-first time; marker file in cwd), FAKE_IGNORE_OWED (reply with an unrelated say), FAKE_PROPOSAL_TEXT.
+first time; marker file in cwd), FAKE_IGNORE_OWED (reply with an unrelated say), FAKE_PROPOSAL_TEXT,
+FAKE_DECLINE_NOMINATION (answer a bare nomination with nothing).
 Registry: {"harness": "command", "command": ["python3", "<path>/tests/fake_agent.py"]}.
 """
 import json
@@ -75,7 +76,7 @@ for what, rid, kind, frm, thread in owed:
             out.append({"kind": "accept", "thread": thread, "re": [rid],
                         "body": {"reasons": [f"{me} checked #{rid} against the ask; consistent.", "No open questions."]}})
 
-if not owed and nominated and mode == "turn":
+if not owed and nominated and mode == "turn" and not os.environ.get("FAKE_DECLINE_NOMINATION"):
     mine = {r["id"] for r in records if r["self"] and r["kind"] == "propose"}
     objs = [r for r in records if r["kind"] == "object" and set(r["re"]) & mine]
     if objs:
@@ -83,6 +84,14 @@ if not owed and nominated and mode == "turn":
         target = next(x for x in o["re"] if x in mine)
         out.append({"kind": "propose", "thread": o["thread"], "re": [target, o["id"]],
                     "body": {"text": f"Amended proposal [v2] from {me}: the previous design plus a rollback path, answering #{o['id']}."}})
+
+# a chair with ready threads decides them (the standing block of a chair lists them under "decide:")
+if re.search(r"^--- standing: you are \S+, chair", text, re.M):
+    for root, rest in re.findall(r"^  #(\S+) ready — proposals: (.*)$", text, re.M):
+        props = re.findall(r"#(\S+) (?:accepted|contested|pending)", rest)
+        accepted = re.findall(r"#(\S+) accepted", rest)
+        out.append({"kind": "decide", "thread": root, "re": accepted or props,
+                    "body": {"text": f"{me} (chair): closing #{root}; going with " + (", ".join("#" + x for x in accepted) if accepted else "nothing — contested and unresolved") + "."}})
 
 if mode == "objection" and obj_to:
     already = {t for r in records if r["self"] and r["kind"] == "object" for t in r["re"]}

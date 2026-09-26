@@ -2,16 +2,27 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/laundrevity/parley/main/schema/participants.schema.json",
   "title": "parley participant registry",
-  "description": "participants.json: who is in the parley. Exactly one participant has role chair, and the chair is human (enforced by tools/validate.py, not expressible here).",
+  "description": "participants.json: who is in the parley. Chair is a role, not a species: zero or more participants of any non-tool kind may hold it (tools may not; tools/validate.py enforces that).",
   "type": "object",
-  "required": ["participants"],
+  "required": [
+    "participants"
+  ],
   "additionalProperties": false,
   "properties": {
-    "name": { "type": "string", "description": "Optional label for this parley." },
+    "name": {
+      "type": "string",
+      "description": "Optional label for this parley."
+    },
     "participants": {
       "type": "array",
       "minItems": 2,
-      "items": { "$ref": "#/$defs/participant" }
+      "items": {
+        "$ref": "#/$defs/participant"
+      }
+    },
+    "base_branch": {
+      "type": "string",
+      "description": "The integration branch for repo-capable participants (default: the first chair's branch, else main)."
     }
   },
   "$defs": {
@@ -21,30 +32,64 @@
     },
     "participant": {
       "type": "object",
-      "required": ["id", "kind", "latency"],
+      "required": [
+        "id",
+        "kind",
+        "latency"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": { "$ref": "#/$defs/participantId" },
-        "kind": { "enum": ["human", "model", "tool"] },
-        "role": { "enum": ["chair", "member"], "default": "member" },
-        "model": { "type": "string", "description": "Model string as the harness reports it. Required for kind model." },
+        "id": {
+          "$ref": "#/$defs/participantId"
+        },
+        "kind": {
+          "enum": [
+            "human",
+            "model",
+            "tool"
+          ]
+        },
+        "role": {
+          "enum": [
+            "chair",
+            "member"
+          ],
+          "default": "member",
+          "description": "chair: may decide, sees every record, never owes review. Any human or model; zero or more per parley."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model string as the harness reports it. Required for kind model."
+        },
         "harness": {
           "type": "string",
-          "description": "How this participant is invoked: claude-code, codex-cli, llama-server, human, dispatch, ... Free-form; the dispatcher keys on it."
+          "description": "How this participant is reached: claude-code, codex-cli (the CLIs, under their own logins — agentic in a worktree when the participant has the repo capability, text-only with tools off when it does not); llama-server (a local OpenAI-compatible server); command (any program: projection on stdin, records on stdout); inbox (files); human (see mode); dispatch."
         },
         "capabilities": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "uniqueItems": true,
           "default": [],
           "description": "Defined values: repo (has a worktree; can read code and the log directly), shell, web. Others are free-form."
         },
         "latency": {
-          "enum": ["human", "minutes", "seconds"],
+          "enum": [
+            "human",
+            "minutes",
+            "seconds"
+          ],
           "description": "Sets the dispatcher's per-turn wait and how the projection is budgeted. human: no deadline."
         },
-        "worktree": { "type": "string", "description": "Path of this participant's git worktree, relative to the chair's checkout." },
-        "branch": { "type": "string", "description": "Branch this participant commits to; convention parley/<id>." },
+        "worktree": {
+          "type": "string",
+          "description": "Path of this participant's git worktree, relative to the chair's checkout."
+        },
+        "branch": {
+          "type": "string",
+          "description": "Branch this participant commits to; convention parley/<id>."
+        },
         "context_budget": {
           "type": "integer",
           "minimum": 512,
@@ -56,32 +101,101 @@
           "default": 80,
           "description": "Diffs at or under this many lines are inlined in this participant's projection; larger ones are referenced."
         },
-        "notes": { "type": "string" },
+        "notes": {
+          "type": "string"
+        },
         "command": {
-          "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" }, "minItems": 1 }],
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          ],
           "description": "Harness knob: executable (or argv prefix) that invokes this participant. Defaults: claude, codex. For harness `command`, the program that reads a projection on stdin and prints records."
         },
         "harness_args": {
-          "type": "array", "items": { "type": "string" },
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
           "description": "Harness knob: extra arguments appended to the invocation (permissions, sandbox, model flags)."
         },
         "session": {
-          "enum": ["resume", "fresh", "resume-last"],
+          "enum": [
+            "resume",
+            "fresh",
+            "resume-last"
+          ],
           "description": "Harness knob: resume the participant's CLI session between turns (delta projections) or start fresh each turn (full-log projections)."
         },
-        "timeout_s": { "type": "integer", "minimum": 1, "description": "Harness knob: per-turn wall-clock limit; overrides the latency-class default." },
-        "endpoint": { "type": "string", "description": "Harness knob (llama-server): chat-completions URL." },
-        "max_tokens": { "type": "integer", "minimum": 1 },
-        "temperature": { "type": "number", "minimum": 0 }
+        "timeout_s": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Harness knob: per-turn wall-clock limit; overrides the latency-class default."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Harness knob (llama-server): chat-completions URL of the local server."
+        },
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "extra_args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Harness knob: arguments appended after the defaults (or after harness_args): model selection, reasoning effort, anything else. Does not disturb the sandbox/permission defaults."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Harness knob: environment variables for the CLI process (e.g. MAX_THINKING_TOKENS for claude-code)."
+        },
+        "mode": {
+          "enum": [
+            "exit",
+            "prompt",
+            "inbox"
+          ],
+          "default": "exit",
+          "description": "Human harness only: how the dispatcher reaches this person. exit: stop the run and print their block; prompt: an interactive prompt (when they are the operator, `parley run -i`); inbox: .parley/inbox/<id>.md in, <id>.reply.md out."
+        },
+        "effort": {
+          "type": "string",
+          "description": "Harness knob: reasoning effort. claude-code → --effort, codex-cli → -c model_reasoning_effort (low|medium|high|xhigh|max; codex also minimal)."
+        }
       },
       "allOf": [
         {
-          "if": { "required": ["kind"], "properties": { "kind": { "const": "model" } } },
-          "then": { "required": ["model"] }
-        },
-        {
-          "if": { "required": ["role"], "properties": { "role": { "const": "chair" } } },
-          "then": { "properties": { "kind": { "const": "human" } } }
+          "if": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "model"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "model"
+            ]
+          }
         }
       ]
     }

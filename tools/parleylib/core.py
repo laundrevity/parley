@@ -17,14 +17,11 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if TOOLS_DIR not in sys.path:
-    sys.path.insert(0, TOOLS_DIR)
-import validate as V  # noqa: E402
+from . import validate as V
+from .paths import SCHEMA_DIR, TOOLS_DIR  # noqa: F401  (TOOLS_DIR re-exported for callers)
 
 STAR = ["*"]
 TMP_RE = re.compile(r"^tmp-[A-Za-z0-9._-]{1,32}$")
-SCHEMA_DIR = os.path.join(os.path.dirname(TOOLS_DIR), "schema")
 
 
 def now_ts() -> str:
@@ -74,15 +71,49 @@ class Parley:
         return {p["id"]: p for p in self.registry["participants"]}
 
     @property
-    def chair(self) -> str:
-        return next(p["id"] for p in self.registry["participants"] if p.get("role") == "chair")
+    def chairs(self) -> list:
+        """Chair is a role, not a species: zero or more participants of any non-tool kind."""
+        return [p["id"] for p in self.registry["participants"] if p.get("role") == "chair"]
+
+    @property
+    def chair(self) -> Optional[str]:
+        """A representative chair (for messages), or None in a chairless parley."""
+        cs = self.chairs
+        return sorted(cs)[0] if cs else None
 
     @property
     def base_branch(self) -> str:
-        return self.participants[self.chair].get("branch", "main")
+        reg = self.registry
+        if reg.get("base_branch"):
+            return reg["base_branch"]
+        parts = self.participants
+        for pid in self.chairs:
+            if parts[pid].get("branch"):
+                return parts[pid]["branch"]
+        for p in reg["participants"]:
+            if p.get("kind") == "human" and p.get("branch"):
+                return p["branch"]
+        return "main"
 
     def agents(self) -> list:
         return [p for p in self.registry["participants"] if p.get("kind") == "model"]
+
+    def humans(self) -> list:
+        return [p for p in self.registry["participants"] if p.get("kind") == "human"]
+
+    def me(self, explicit: Optional[str] = None) -> str:
+        """Which participant the person at the keyboard is: --as, $PARLEY_AS, the only human, the only chair."""
+        cand = explicit or os.environ.get("PARLEY_AS")
+        parts = self.participants
+        if cand:
+            if cand not in parts:
+                raise KeyError(f"'{cand}' is not a participant (have: {', '.join(parts)})")
+            return cand
+        humans = [p["id"] for p in self.humans()]
+        if len(humans) == 1:
+            return humans[0]
+        raise KeyError("say who you are: --as <id> (or export PARLEY_AS); candidates: " +
+                       ", ".join(humans or list(parts)))
 
     def worktree(self, p: dict) -> Optional[str]:
         wt = p.get("worktree")
@@ -110,10 +141,10 @@ class Parley:
         return recs[-1].id if recs else None
 
     def last_visible_id(self, pid: str, records: Optional[list] = None) -> Optional[str]:
-        chair = self.chair
+        chairs = set(self.chairs)
         recs = records if records is not None else self.records()
         for r in reversed(recs):
-            if pid == chair or r.visibility == STAR or pid in r.visibility:
+            if pid in chairs or r.visibility == STAR or pid in r.visibility:
                 return r.id
         return None
 
@@ -127,6 +158,8 @@ class Parley:
     def normalize(self, author: str, records: list, seen: Optional[str], existing: list) -> list:
         """Assign ids and ts, stamp seen and from, rewrite tmp- ids. Returns new dicts."""
         ids = self._next_ids(existing, len(records))
+        records = [self.lenient(dict(r)) for r in records]
+        closed = {root for root, t in self.replay(existing).threads.items() if t.closed}
         mapping = {}
         for rec, new_id in zip(records, ids):
             old = rec.get("id")
@@ -144,9 +177,16 @@ class Parley:
             if isinstance(r.get("re"), list):
                 r["re"] = [mapping.get(x, x) if isinstance(x, str) else x for x in r["re"]]
             if not r.get("thread"):
-                # no thread given: a record with a single re inherits that record's thread; else it roots a new one
+                # no thread given: inherit the first re target's thread — unless that thread is closed and
+                # this record would need obligations there (anything but say), in which case it roots a
+                # new thread that re's the old one (PROTOCOL §6: follow-ups to a decide are new threads)
                 tgt = next((x for x in existing if r.get("re") and x.id == r["re"][0]), None)
-                r["thread"] = tgt.thread if tgt else new_id
+                if tgt is None:
+                    r["thread"] = new_id
+                elif r.get("kind") != "say" and tgt.thread in closed:
+                    r["thread"] = new_id
+                else:
+                    r["thread"] = tgt.thread
             for k in ("to", "next", "visibility"):
                 if k in r and not r[k]:
                     del r[k]
@@ -159,6 +199,25 @@ class Parley:
                     ordered[k] = r[k]
             out.append(ordered)
         return out
+
+    @staticmethod
+    def lenient(r: dict) -> dict:
+        """Shapes agents produce from the projection alone, accepted rather than bounced:
+        ids written as #001 (the prose form), scalar `re`/`to`/`next`, and a bare string
+        body for kinds whose body is {text}. Nothing semantic is changed."""
+        for k in ("re", "to", "next", "visibility"):
+            if isinstance(r.get(k), str):
+                r[k] = [r[k]]
+        if isinstance(r.get("re"), list):
+            r["re"] = [x.lstrip("#") if isinstance(x, str) else x for x in r["re"]]
+        for k in ("thread", "id", "seen"):
+            if isinstance(r.get(k), str) and r[k].startswith("#"):
+                r[k] = r[k].lstrip("#")
+        if isinstance(r.get("to"), list):
+            r["to"] = [x.lstrip("@") if isinstance(x, str) else x for x in r["to"]]
+        if r.get("kind") in ("say", "ask", "propose", "decide") and isinstance(r.get("body"), str):
+            r["body"] = {"text": r["body"]}
+        return r
 
     def validate_turn(self, new_dicts: list, existing: list) -> list:
         """Findings (violations only) attributable to the new records."""
@@ -261,7 +320,7 @@ def build_record(kind: str, *, text: Optional[str] = None, reasons: Optional[lis
         body["text"] = text or ""
     else:
         body["reasons"] = reasons or []
-        if text:
+        if text and kind == "object":          # accept is reasons only (PROTOCOL §12)
             body["text"] = text
         if kind == "object" and quote:
             body["quote"] = quote
@@ -281,38 +340,55 @@ def build_record(kind: str, *, text: Optional[str] = None, reasons: Optional[lis
     return rec
 
 
-def extract_records(text: str) -> tuple:
-    """Pull records out of an agent's reply. Returns (records, note). A ```jsonl / ```json
-    fence wins; failing that, the whole text is tried as JSONL, then as a JSON array."""
-    fences = re.findall(r"```(?:jsonl|json)?\s*\n(.*?)```", text, re.S)
-    candidates = fences if fences else [text]
-    last_err = None
-    for cand in candidates:
-        cand = cand.strip()
-        if not cand:
-            return [], "empty fence"
+def _try_parse(cand: str):
+    """Records from a fence body: a JSON array, one object, or JSONL. None if it does not parse."""
+    cand = cand.strip()
+    if not cand:
+        return []
+    try:
+        arr = json.loads(cand)
+        if isinstance(arr, list):
+            return [x for x in arr if isinstance(x, dict)]
+        if isinstance(arr, dict):
+            return [arr]
+    except json.JSONDecodeError:
+        pass
+    recs = []
+    for line in cand.splitlines():
+        line = line.strip()
+        if not line:
+            continue
         try:
-            arr = json.loads(cand)
-            if isinstance(arr, list):
-                return [x for x in arr if isinstance(x, dict)], "json array"
-            if isinstance(arr, dict):
-                return [arr], "json object"
+            obj = json.loads(line)
         except json.JSONDecodeError:
-            pass
-        recs, ok = [], True
-        for line in cand.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as e:
-                ok, last_err = False, str(e)
-                break
-            if isinstance(obj, dict):
-                recs.append(obj)
-        if ok and recs:
-            return recs, "jsonl"
-    if not fences:
+            return None
+        if isinstance(obj, dict):
+            recs.append(obj)
+    return recs or None
+
+
+def extract_records(text: str) -> tuple:
+    """Pull records out of an agent's reply. Returns (records, note).
+
+    A ```jsonl / ```json fence wins. Record bodies routinely contain code fences of their own
+    (a Lean proof, a diff), so the closing fence is not the first ``` after the opener: every
+    later ``` is tried as the closer and the first content that parses is taken. Failing any
+    fence, the whole text is tried as JSONL / a JSON array."""
+    openers = [m for m in re.finditer(r"```(jsonl|json)?[ \t]*\n", text)]
+    labeled = [m for m in openers if m.group(1)] or openers
+    last_err = None
+    for m in labeled:
+        body_start = m.end()
+        closers = [c.start() for c in re.finditer(r"```", text[body_start:])]
+        candidates = [text[body_start:body_start + c] for c in closers] + [text[body_start:]]
+        for cand in candidates:
+            got = _try_parse(cand)
+            if got is not None:
+                return got, ("empty fence" if not got else "fence")
+        last_err = "no closing fence yields valid JSON"
+    if not openers:
+        got = _try_parse(text)
+        if got:
+            return got, "bare jsonl"
         return [], "no fence"
     return [], f"unparseable fence: {last_err}"

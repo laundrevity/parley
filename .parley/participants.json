@@ -1,0 +1,99 @@
+{
+  "name": "parley",
+  "participants": [
+    {
+      "id": "conor",
+      "kind": "human",
+      "role": "chair",
+      "harness": "human",
+      "latency": "human",
+      "capabilities": [
+        "repo",
+        "shell",
+        "web"
+      ],
+      "branch": "main"
+    },
+    {
+      "id": "claude",
+      "kind": "model",
+      "model": "claude-fable-5-1",
+      "harness": "claude-code",
+      "latency": "minutes",
+      "capabilities": [
+        "repo",
+        "shell",
+        "web"
+      ],
+      "worktree": "../parley-claude",
+      "branch": "parley/claude",
+      "inline_diff_lines": 80,
+      "session": "resume",
+      "notes": "default flags: --permission-mode acceptEdits --allowedTools \"Bash(git:*)\". Set harness_args to widen, e.g. [\"--permission-mode\",\"acceptEdits\",\"--allowedTools\",\"Bash(git:*)\",\"Bash(lake:*)\"]; harness_args replaces the defaults"
+    },
+    {
+      "id": "codex",
+      "kind": "model",
+      "model": "gpt-5-codex",
+      "harness": "codex-cli",
+      "latency": "minutes",
+      "capabilities": [
+        "repo",
+        "shell"
+      ],
+      "worktree": "../parley-codex",
+      "branch": "parley/codex",
+      "inline_diff_lines": 80,
+      "notes": "model is a label in the log; codex uses its own config. default flags: --sandbox workspace-write plus the repo's .git as a writable root; set harness_args to change (it replaces the defaults), e.g. add \"-c\",\"sandbox_workspace_write.network_access=true\" if it needs the network",
+      "session": "fresh"
+    },
+    {
+      "id": "fable",
+      "kind": "model",
+      "model": "claude-fable-5-1",
+      "harness": "claude-code",
+      "latency": "minutes",
+      "capabilities": [],
+      "effort": "max",
+      "session": "resume",
+      "notes": "text-only Fable through Claude Code under your Max login: no tools (--disallowedTools '*'), no worktree, rules via --append-system-prompt, --effort max.",
+      "extra_args": [
+        "--model",
+        "fable"
+      ]
+    },
+    {
+      "id": "astra",
+      "kind": "model",
+      "model": "gpt-6-astra",
+      "harness": "codex-cli",
+      "latency": "minutes",
+      "capabilities": [],
+      "effort": "max",
+      "session": "fresh",
+      "notes": "text-only GPT-6 Astra through Codex under your ChatGPT login: read-only sandbox, no worktree, rules prepended to the prompt, reasoning effort max.",
+      "extra_args": [
+        "-m",
+        "gpt-6-astra"
+      ]
+    },
+    {
+      "id": "llama",
+      "kind": "model",
+      "model": "Qwen3.8-27B-Q6_K.gguf",
+      "harness": "llama-server",
+      "latency": "seconds",
+      "capabilities": [],
+      "context_budget": 6000,
+      "inline_diff_lines": 0,
+      "notes": "set model to the file llama-server loads; no repo access, so address it on prose/design proposals, not diffs"
+    },
+    {
+      "id": "dispatch",
+      "kind": "tool",
+      "harness": "dispatch",
+      "latency": "seconds",
+      "notes": "the appender's voice: timeouts, rejected turns, rebase conflicts and summaries are `say` records from dispatch"
+    }
+  ]
+}

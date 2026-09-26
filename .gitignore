@@ -1,2 +1,14 @@
 __pycache__/
 *.pyc
+.venv/
+*.egg-info/
+dist/
+uv.lock
+
+# parley runtime state in this repository (the template registry and the empty log are tracked)
+.parley/state.json
+.parley/dispatch.log
+.parley/inbox/
+.parley/worktrees/
+.parley/system-*.txt
+.parley/lock
