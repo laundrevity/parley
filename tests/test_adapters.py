@@ -122,6 +122,14 @@ class Fences(unittest.TestCase):
 
 
 class ApiAdapters(unittest.TestCase):
+    def test_session_lost_is_recognized(self):
+        class R:
+            def __init__(self, error, raw=""):
+                self.error, self.raw = error, raw
+        self.assertTrue(harness.session_lost(R("claude reported an error: No conversation found with session ID: 9f2")))
+        self.assertFalse(harness.session_lost(R("timeout after 10s")))
+        self.assertFalse(harness.session_lost(R("exit 1: Credit balance is too low")))
+
     def test_api_keys_never_reach_the_clis(self):
         saved = {k: os.environ.get(k) for k in harness.API_KEY_VARS}
         try:

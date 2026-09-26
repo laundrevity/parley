@@ -181,6 +181,19 @@ class Dispatcher:
                                record_schema=self.record_schema, repo=parley.repo, state_dir=parley.dir)
         parley.log_event(f"REPLY {pid} elapsed={res.elapsed:.0f}s error={res.error!r} note={res.note!r} cmd={res.cmd!r}\n{res.raw}\n")
 
+        # a resumed CLI session that is gone (expired, deleted, another machine) is not the participant's
+        # failure: forget it and re-run once as a fresh session over the whole visible log
+        if res.records is None and not fresh and ps0.get("session_id") and harness.session_lost(res):
+            eprint(f"  {pid}: previous session cannot be resumed; starting a fresh one over the whole log")
+            parley.log_event(f"SESSION LOST {pid}: {res.error!r}")
+            ps0 = dict(ps0); ps0.pop("session_id", None)
+            self.with_state(lambda st: parley.pstate(st, pid).pop("session_id", None))
+            projection = ("(fresh session: this is the whole log you can see; records you have not been shown before are marked (new))\n\n"
+                          + pj.build(None, p.get("context_budget"), False, ps0.get("last_shown")))
+            res = harness.run_turn(p, projection, wt or parley.repo, ps0, mode=mode, system_prompt=system_prompt,
+                                   record_schema=self.record_schema, repo=parley.repo, state_dir=parley.dir)
+            parley.log_event(f"REPLY {pid} elapsed={res.elapsed:.0f}s error={res.error!r} note={res.note!r} cmd={res.cmd!r}\n{res.raw}\n")
+
         if res.records is None:
             eprint(f"  {pid}: FAILED — {res.error}")
             self.fail(pid, last_visible, f"{pid}: {res.error}", owed)

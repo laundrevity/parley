@@ -157,6 +157,16 @@ def parse_claude_output(out: str) -> tuple:
     return (obj.get("result") or ""), obj.get("session_id"), bool(obj.get("is_error"))
 
 
+SESSION_LOST_MARKERS = ("no conversation found", "session id", "session not found", "could not resume",
+                        "unable to resume", "no session")
+
+
+def session_lost(res) -> bool:
+    """Does this failed result say the resumed CLI session is gone (rather than that the turn failed)?"""
+    blob = ((res.error or "") + " " + (res.raw or "")[:2000]).lower()
+    return any(m in blob for m in SESSION_LOST_MARKERS)
+
+
 def run_claude_code(p: dict, projection: str, cwd: str, timeout: Optional[int], pstate: dict, repo: str,
                     system_prompt: str = "") -> TurnResult:
     cmd = claude_cmd(p, pstate, repo, system_prompt)
