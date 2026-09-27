@@ -321,7 +321,13 @@ def cmd_doctor(a) -> None:
             exe = exe[0] if isinstance(exe, list) else exe.split()[0]
             line(shutil.which(exe) is not None, f"`{exe}` on PATH")
         if h == "llama-server":
-            line(True, f"endpoint {p.get('endpoint', 'http://127.0.0.1:8080/v1/chat/completions')} (not probed)")
+            url = p.get("endpoint", harness.LLAMA_DEFAULT_ENDPOINT)
+            problem = harness.llama_probe(p)
+            line(problem is None, f"endpoint {url}" + ("" if problem is None else f": {problem}"))
+            if p.get("api_key_cmd") and harness.llama_api_key(p) is None:
+                line(False, f"api_key_cmd `{p['api_key_cmd']}` produced no key (is the server running?)")
+            if p.get("chat_template_kwargs") is None:
+                print("  note     no chat_template_kwargs: a thinking model will open a think block under the records grammar; set {\"enable_thinking\": false} or serve with thinking off")
         wt = parley.worktree(p)
         if wt:
             line(os.path.isdir(wt), f"worktree {wt}")

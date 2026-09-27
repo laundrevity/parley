@@ -19,7 +19,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 
-from . import core, harness
+from . import core, gendocs, harness
 from . import project as P
 from . import validate as V
 
@@ -277,7 +277,19 @@ class Dispatcher:
         g = lambda *a: subprocess.run(["git", *a], cwd=wt, capture_output=True, text=True)
         if g("merge-base", "--is-ancestor", base, "HEAD").returncode == 0:
             return                                   # already on top of base; nothing to do
-        r = g("rebase", "--autostash", base)         # autostash: uncommitted work in the worktree survives
+        # The generated agent-rules file (CLAUDE.md / AGENTS.md) is a skip-worktree edit of a tracked
+        # file, which autostash does not cover: when `base` changed that file, the rebase's checkout
+        # refuses to overwrite it. Set it aside, rebase, then regenerate it onto the new base.
+        doc = gendocs.TARGETS.get(p.get("harness", ""))
+        regen = bool(doc) and g("ls-files", "-v", "--", doc).stdout.startswith("S")
+        if regen:
+            g("update-index", "--no-skip-worktree", "--", doc)
+            g("checkout", "--", doc)
+        try:
+            r = g("rebase", "--autostash", base)     # autostash: uncommitted work in the worktree survives
+        finally:
+            if regen:
+                gendocs.main(["--for", p["id"], "--parley", self.parley.dir, "--repo", self.parley.repo])
         if r.returncode == 0:
             return
         files = g("diff", "--name-only", "--diff-filter=U").stdout.split()

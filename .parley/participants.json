@@ -80,13 +80,19 @@
     {
       "id": "llama",
       "kind": "model",
-      "model": "Qwen3.8-27B-Q6_K.gguf",
+      "model": "HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF:Q8_K_P",
       "harness": "llama-server",
       "latency": "seconds",
       "capabilities": [],
       "context_budget": 6000,
       "inline_diff_lines": 0,
-      "notes": "set model to the file llama-server loads; no repo access, so address it on prose/design proposals, not diffs"
+      "notes": "a stock llama-server started by lethe (per-launch api key via `lethe key`, 127.0.0.1 only). `model` is a label in the log; the server serves whatever `lethe serve [spec]` loaded. No repo access, so address it on prose/design proposals, not diffs. Thinking is off both ways: --no-thinking at serve and enable_thinking false per request, because the records grammar leaves no room for a think block.",
+      "api_key_cmd": "uv run --project ~/dev/lethe lethe key",
+      "chat_template_kwargs": {
+        "enable_thinking": false
+      },
+      "serve": "uv run --project ~/dev/lethe lethe serve --no-thinking",
+      "max_tokens": 2500
     },
     {
       "id": "dispatch",

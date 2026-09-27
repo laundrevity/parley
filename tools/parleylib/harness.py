@@ -16,6 +16,11 @@ Registry knobs (all optional):
   timeout_s     overrides the latency-class default (minutes: 3600, seconds: 120)
   endpoint      llama-server URL (default http://127.0.0.1:8080/v1/chat/completions)
   max_tokens, temperature   llama-server sampling
+  api_key | api_key_cmd | api_key_env   llama-server bearer token: literal, the stdout of a command run at
+                  each turn (lethe: "lethe key"), or an environment variable. Sent as Authorization: Bearer.
+  chat_template_kwargs   passed through to llama-server, e.g. {"enable_thinking": false}: a thinking model
+                  under the records grammar must not open a think block
+  serve         the command that starts the server; printed by doctor and in the unreachable note, never run
   effort        reasoning effort, one knob: claude-code -> --effort, codex-cli -> -c model_reasoning_effort
                   (low|medium|high|xhigh|max; codex also minimal)
   mode          human harness: exit (default: the run stops when it is their turn) | prompt | inbox
@@ -243,9 +248,59 @@ def output_schema(record_schema: dict, pid: str, kinds: list) -> dict:
     return {"type": "array", "items": {"oneOf": variants}, "$defs": defs}
 
 
+LLAMA_DEFAULT_ENDPOINT = "http://127.0.0.1:8080/v1/chat/completions"
+
+
+def llama_api_key(p: dict) -> Optional[str]:
+    """The bearer token for a llama-server participant: literal, from an environment variable,
+    or the stdout of a command (lethe: `lethe key`, which prints the per-launch key)."""
+    key = p.get("api_key")
+    if not key and p.get("api_key_env"):
+        key = os.environ.get(p["api_key_env"])
+    if not key and p.get("api_key_cmd"):
+        try:
+            r = subprocess.run(p["api_key_cmd"], shell=True, capture_output=True, text=True, timeout=60)
+            key = r.stdout.strip() if r.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired):
+            key = None
+    return key or None
+
+
+def llama_headers(p: dict) -> dict:
+    headers = {"Content-Type": "application/json"}
+    key = llama_api_key(p)
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def llama_unreachable(p: dict, url: str, err) -> str:
+    hint = f" — start it: {p['serve']}" if p.get("serve") else ""
+    return f"llama-server unreachable at {url}: {err}{hint}"
+
+
+def llama_probe(p: dict, timeout: float = 5.0) -> Optional[str]:
+    """GET /health on the participant's server. None when it answers, else the problem."""
+    url = p.get("endpoint", LLAMA_DEFAULT_ENDPOINT)
+    base = url.split("/v1/")[0] if "/v1/" in url else url.rsplit("/", 1)[0]
+    req = urllib.request.Request(base + "/health", headers=llama_headers(p))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            if resp.status != 200:
+                return f"/health returned {resp.status}: {body[:200]}"
+            return None
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return f"/health refused the api key ({e.code}); check api_key_cmd / api_key_env"
+        return f"/health returned {e.code}"
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return llama_unreachable(p, url, e)
+
+
 def run_llama_server(p: dict, projection: str, cwd: str, timeout: Optional[int], pstate: dict,
                      system_prompt: str, kinds: list, record_schema: dict) -> TurnResult:
-    url = p.get("endpoint", "http://127.0.0.1:8080/v1/chat/completions")
+    url = p.get("endpoint", LLAMA_DEFAULT_ENDPOINT)
     payload = {
         "model": p.get("model", "default"),
         "messages": [{"role": "system", "content": system_prompt},
@@ -255,14 +310,19 @@ def run_llama_server(p: dict, projection: str, cwd: str, timeout: Optional[int],
         "response_format": {"type": "json_schema",
                             "json_schema": {"name": "parley_records", "schema": output_schema(record_schema, p["id"], kinds)}},
     }
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"})
+    if p.get("chat_template_kwargs"):
+        payload["chat_template_kwargs"] = p["chat_template_kwargs"]
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=llama_headers(p))
     t0 = time.time()
     try:
         with urllib.request.urlopen(req, timeout=timeout or 120) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:300]
+        what = "refused the api key; check api_key_cmd / api_key_env" if e.code in (401, 403) else body
+        return TurnResult(None, "", f"llama-server at {url} returned {e.code}: {what}", elapsed=time.time() - t0)
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return TurnResult(None, "", f"llama-server unreachable at {url}: {e}", elapsed=time.time() - t0)
+        return TurnResult(None, "", llama_unreachable(p, url, e), elapsed=time.time() - t0)
     try:
         text = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
